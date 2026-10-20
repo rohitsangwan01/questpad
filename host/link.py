@@ -43,6 +43,7 @@ class Host:
         self.stats, self.quiet = None, False
         self.t0 = time.time()
         self.hands = {}  # slot -> (name, Hand)
+        self.is_q3 = {}  # slot -> bool (True for Quest 3 / modern, False for legacy)
         self.logbuf = {}  # slot -> partial log line
         self.seen_ids = set()
 
@@ -52,8 +53,10 @@ class Host:
             slot, dev_id, dev_type = f[1], f[2:10], struct.unpack_from("<I", f, 10)[0]
             name = TYPE_NAMES.get(dev_type, "right" if dev_type & 0x1_0000 else "left")
             self.hands[slot] = (name, Hand())
+            self.is_q3[slot] = (dev_type >> 24) == 0x9A
             print(f"JOIN slot {slot}: {name} id={dev_id.hex()}")
         elif kind == 0xA2:
+            self.is_q3.pop(f[1], None)
             name = self.hands.pop(f[1], ("?",))[0]
             print(f"DROP slot {f[1]} ({name})")
         elif kind == 0xA1:
@@ -69,7 +72,10 @@ class Host:
             tl_id, tl_flags = payload[1], payload[2]
             if tl_flags & TL_NOTIFICATION and len(payload) > 3:
                 name, hand = self.hands[slot]
-                off = 3 if is_valid_ntf(payload[3:]) else 7
+                if slot in self.is_q3:
+                    off = 3 if self.is_q3[slot] else 7
+                else:
+                    off = 3 if is_valid_ntf(payload[3:]) else 7
                 if off == 7 and len(payload) >= 3 + LOG_ITEM_LEN:
                     self.log_item(slot, name, payload[3 : 3 + LOG_ITEM_LEN])
                 ntf = payload[off:]

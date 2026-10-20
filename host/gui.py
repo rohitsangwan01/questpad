@@ -22,6 +22,7 @@ try:
 except ImportError:
     sys.path.insert(0, os.path.join(HERE, "vendor"))
 
+import dm  # noqa: E402
 import dsu  # noqa: E402
 import visualizer  # noqa: E402
 from bridge import Bridge  # noqa: E402
@@ -172,6 +173,9 @@ class App:
         self.events = queue.Queue()
         self.worker = Worker(self.events)
         self.hands = {}  # slot -> (side, Hand)
+        self.is_q3 = {}  # slot -> bool
+        self._pairing_active = False
+        self._firmware_pairing_active = False
         self.settings = None
         self.connected = False
         self.version = ""
@@ -387,6 +391,7 @@ class App:
                 inputs.set("")
         live = {slot for slot, _, _ in st["controllers"]}
         self.hands = {s: h for s, h in self.hands.items() if s in live}
+        self.is_q3 = {s: q for s, q in self.is_q3.items() if s in live}
         if self.visualizer:
             for slot, side, battery in st["controllers"]:
                 self.visualizer.set_controller_slot(slot, side, battery)
@@ -395,8 +400,10 @@ class App:
             if ps in ("waiting", "writing"):
                 self.pair_var.set(PAIR_TEXT[ps])
                 self.pair_btn.config(text="Cancel pairing")
+                self._firmware_pairing_active = True
             else:
                 self.pair_btn.config(text="Pair a controller")
+                self._firmware_pairing_active = False
         self._show_motion()
 
     @staticmethod
@@ -412,17 +419,26 @@ class App:
         if f[0] == 0xA7 and not getattr(self, "_pairing_active", False):  # pairing progress
             ps = Bridge.PAIR_STATES[f[1]] if f[1] < len(Bridge.PAIR_STATES) else ""
             self.pair_var.set(PAIR_TEXT.get(ps, ps))
+            self._firmware_pairing_active = ps in ("waiting", "writing")
+            if self._firmware_pairing_active:
+                self.pair_btn.config(text="Cancel pairing")
+            else:
+                self.pair_btn.config(text="Pair a controller")
         elif f[0] == 0xA0:
             slot = f[1]
             dev_type = struct.unpack_from("<I", f, 10)[0]
             side = "right" if dev_type & 0x1_0000 != 0 else "left"
             if slot not in self.hands or self.hands[slot][0] != side:
                 self.hands[slot] = (side, Hand())
+            self.is_q3[slot] = (dev_type >> 24) == 0x9A
         elif f[0] == 0xA1 and f[3] and f[1] in self.hands:
             p = f[4:]
             if len(p) > 3 and p[2] & 0x40:
                 side, h = self.hands[f[1]]
-                off = 3 if self.is_valid_ntf(p[3:]) else 7
+                if f[1] in self.is_q3:
+                    off = 3 if self.is_q3[f[1]] else 7
+                else:
+                    off = 3 if self.is_valid_ntf(p[3:]) else 7
                 h.update(p[off:])
                 names = "ABS*" if side == "right" else "XYS*"
                 btn = "".join(n if h.buttons >> i & 1 else "." for i, n in enumerate(names))
@@ -465,6 +481,12 @@ class App:
             self.pair_var.set(PAIR_TEXT["cancelled"])
             self.worker.call(lambda b: b.link_resume())
             return
+        if getattr(self, "_firmware_pairing_active", False):
+            self._firmware_pairing_active = False
+            self.pair_btn.config(text="Pair a controller")
+            self.pair_var.set(PAIR_TEXT["cancelled"])
+            self.worker.call(lambda b: b.pair_start())
+            return
 
         self._pairing_active = True
         self._cancel_pairing = False
@@ -483,10 +505,10 @@ class App:
                         net_id = int(pj["network_id"])
                         link_key = bytes.fromhex(pj["link_key"])
                     except Exception:
-                        net_id = int.from_bytes(os.urandom(4), "little") & 0x7FFFFFFF
+                        net_id = dm.good_network_id()
                         link_key = os.urandom(16)
                 else:
-                    net_id = int.from_bytes(os.urandom(4), "little") & 0x7FFFFFFF
+                    net_id = dm.good_network_id()
                     link_key = os.urandom(16)
 
             b.dm_start(any_device=True)

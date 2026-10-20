@@ -636,17 +636,7 @@ fn uplink(l: &mut Link, job: Job, mic_ok: bool) {
     }
     let s = &mut l.slots[slot as usize];
     if !s.used {
-        s.used = true;
-        s.last_frame = l.frame;
-        s.right = slot == 1;
-        s.is_q3 = is_valid_ntf(&p[3..]);
-        let dev_type = if s.is_q3 {
-            if s.right { 0x9a011701 } else { 0x9a001701 }
-        } else {
-            if s.right { 0x13011101 } else { 0x13001101 }
-        };
-        crate::gamepad::link_join(slot, dev_type);
-        let _ = EVENTS.try_send(Event::LinkJoin { slot, id: [0; 8], dev_type });
+        return;
     }
     s.last_frame = l.frame;
     // The device echoes the seq of the last request it took in its TL flags.

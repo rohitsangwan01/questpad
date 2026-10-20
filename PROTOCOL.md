@@ -65,7 +65,7 @@ of the reply header marks an error. Empty polls `[2][0][seq]` keep the link aliv
 | `0x2F` read | battery |
 | `0x14` write | **Quest 1 / Quest 2 pairing record**: `network_id u32`, `link_key[16]` (plaintext) |
 | `0x12` read | **Quest 3 ECDH public key exchange**: host sends 32-byte X25519 public key, controller returns its 32-byte public key |
-| `0x11` write | **Quest 3 encrypted pairing record**: 8-byte IV + 20-byte AES-128-CCM ciphertext (`network_id` + `link_key`) + 4-byte MAC tag |
+| `0x11` / `0x1D` write | **Quest 3 encrypted pairing record**: 8-byte IV + 20-byte AES-128-CCM ciphertext (`network_id` + `link_key`) + 4-byte MAC tag (`0x1D` fallback) |
 | `0x15` write | reset into the main app |
 
 ### Quest 3 ECDH pairing procedure
@@ -77,9 +77,9 @@ Quest 1 and Quest 2 controllers accept the 20-byte pairing record in plaintext o
    - **Plaintext (20 B):** `[network_id u32][link_key 16B]`.
    - **Nonce (13 B):** 5 zero bytes followed by an 8-byte random IV: `[00 00 00 00 00][iv_8]`.
    - **Tag length:** 4 bytes.
-   - **AAD:** `b"\x00"` (matching the Nordic S0 header byte).
+   - **AAD:** `b"\x00"` (matching the Nordic S0 header byte). If rejected, retry with empty AAD (`b""`).
    - **Payload (32 B):** `[iv_8 8B][ciphertext 20B][tag 4B]`.
-4. **Writing encrypted record (`cmd 0x11`, read=False):** The host writes the 32-byte payload via command `0x11`. The controller verifies the tag, decrypts the record, and stores `network_id` and `link_key` into flash.
+4. **Writing encrypted record (`cmd 0x11`, read=False):** The host writes the 32-byte payload via command `0x11`. The controller verifies the tag, decrypts the record, and stores `network_id` and `link_key` into flash. If command `0x11` fails or is rejected, retry sending the same 32-byte payload using command `0x1D`.
 5. **Reboot (`cmd 0x15`, read=False):** The host sends command `0x15` (`RESET`) so the controller exits DM/pairing mode and reboots into its operational Pulsar firmware.
 
 QuestPad generates a random network id (one that makes a good radio address: plenty of bit transitions, no long runs of equal bits) and a random 128-bit key, writes them to each controller, and keeps them in the dongle's flash.

@@ -1,96 +1,32 @@
+import hashlib
+import json
 import os
+import struct
 import sys
 import time
-import struct
-import json
-import ctypes
-import ctypes.util
 
 sys.path.insert(0, os.path.dirname(__file__))
 from bridge import Bridge
-
-# OpenSSL bindings for X25519 and AES-128-CCM
-crypto = ctypes.CDLL(ctypes.util.find_library("crypto"))
-
-NID_X25519 = 1034
-EVP_CTRL_CCM_SET_IVLEN = 0x9
-EVP_CTRL_CCM_SET_TAG = 0x11
-EVP_CTRL_CCM_GET_TAG = 0x10
-
-crypto.EVP_PKEY_new_raw_private_key.restype = ctypes.c_void_p
-crypto.EVP_PKEY_new_raw_private_key.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
-crypto.EVP_PKEY_new_raw_public_key.restype = ctypes.c_void_p
-crypto.EVP_PKEY_new_raw_public_key.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
-crypto.EVP_PKEY_get_raw_public_key.restype = ctypes.c_int
-crypto.EVP_PKEY_get_raw_public_key.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_size_t)]
-crypto.EVP_PKEY_CTX_new.restype = ctypes.c_void_p
-crypto.EVP_PKEY_CTX_new.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-crypto.EVP_PKEY_derive_init.restype = ctypes.c_int
-crypto.EVP_PKEY_derive_init.argtypes = [ctypes.c_void_p]
-crypto.EVP_PKEY_derive_set_peer.restype = ctypes.c_int
-crypto.EVP_PKEY_derive_set_peer.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-crypto.EVP_PKEY_derive.restype = ctypes.c_int
-crypto.EVP_PKEY_derive.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_size_t)]
-crypto.EVP_PKEY_free.argtypes = [ctypes.c_void_p]
-crypto.EVP_PKEY_CTX_free.argtypes = [ctypes.c_void_p]
-
-crypto.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
-crypto.EVP_CIPHER_CTX_free.argtypes = [ctypes.c_void_p]
-crypto.EVP_aes_128_ccm.restype = ctypes.c_void_p
-crypto.EVP_CIPHER_CTX_ctrl.restype = ctypes.c_int
-crypto.EVP_CIPHER_CTX_ctrl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-crypto.EVP_EncryptInit_ex.restype = ctypes.c_int
-crypto.EVP_EncryptInit_ex.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
-crypto.EVP_EncryptUpdate.restype = ctypes.c_int
-crypto.EVP_EncryptUpdate.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int), ctypes.c_char_p, ctypes.c_int]
-crypto.EVP_EncryptFinal_ex.restype = ctypes.c_int
-crypto.EVP_EncryptFinal_ex.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)]
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 
 
 def x25519_keygen():
-    priv = os.urandom(32)
-    pkey = crypto.EVP_PKEY_new_raw_private_key(NID_X25519, None, priv, 32)
-    pub = ctypes.create_string_buffer(32)
-    sz = ctypes.c_size_t(32)
-    crypto.EVP_PKEY_get_raw_public_key(pkey, pub, ctypes.byref(sz))
-    crypto.EVP_PKEY_free(pkey)
-    return priv, bytes(pub.raw)
+    priv = X25519PrivateKey.generate()
+    pub = priv.public_key().public_bytes_raw()
+    return priv.private_bytes_raw(), pub
 
 
 def x25519_derive(priv_bytes, peer_pub_bytes):
-    priv_key = crypto.EVP_PKEY_new_raw_private_key(NID_X25519, None, priv_bytes, 32)
-    peer_key = crypto.EVP_PKEY_new_raw_public_key(NID_X25519, None, peer_pub_bytes, 32)
-    ctx = crypto.EVP_PKEY_CTX_new(priv_key, None)
-    crypto.EVP_PKEY_derive_init(ctx)
-    crypto.EVP_PKEY_derive_set_peer(ctx, peer_key)
-    out = ctypes.create_string_buffer(32)
-    sz = ctypes.c_size_t(32)
-    crypto.EVP_PKEY_derive(ctx, out, ctypes.byref(sz))
-    crypto.EVP_PKEY_CTX_free(ctx)
-    crypto.EVP_PKEY_free(priv_key)
-    crypto.EVP_PKEY_free(peer_key)
-    return bytes(out.raw)
+    priv_key = X25519PrivateKey.from_private_bytes(priv_bytes)
+    peer_key = X25519PublicKey.from_public_bytes(peer_pub_bytes)
+    return priv_key.exchange(peer_key)
 
 
 def aes_ccm_encrypt(key, iv_8, plaintext, aad=b"\x00", tag_len=4):
     nonce_13 = b"\x00" * 5 + iv_8
-    ctx = crypto.EVP_CIPHER_CTX_new()
-    cipher = crypto.EVP_aes_128_ccm()
-    crypto.EVP_EncryptInit_ex(ctx, cipher, None, None, None)
-    crypto.EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_IVLEN, len(nonce_13), None)
-    crypto.EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_SET_TAG, tag_len, None)
-    crypto.EVP_EncryptInit_ex(ctx, None, None, key, nonce_13)
-    out_len = ctypes.c_int(0)
-    crypto.EVP_EncryptUpdate(ctx, None, ctypes.byref(out_len), None, len(plaintext))
-    if aad:
-        crypto.EVP_EncryptUpdate(ctx, None, ctypes.byref(out_len), aad, len(aad))
-    ciphertext = ctypes.create_string_buffer(len(plaintext))
-    crypto.EVP_EncryptUpdate(ctx, ciphertext, ctypes.byref(out_len), plaintext, len(plaintext))
-    crypto.EVP_EncryptFinal_ex(ctx, None, ctypes.byref(out_len))
-    tag = ctypes.create_string_buffer(tag_len)
-    crypto.EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_CCM_GET_TAG, tag_len, tag)
-    crypto.EVP_CIPHER_CTX_free(ctx)
-    return bytes(ciphertext.raw) + bytes(tag.raw)
+    aesccm = AESCCM(key, tag_length=tag_len)
+    return aesccm.encrypt(nonce_13, plaintext, aad if aad else None)
 
 
 def pair_q3(b, network_id, link_key):
@@ -110,7 +46,7 @@ def pair_q3(b, network_id, link_key):
 
     # Step 3: Compute shared secret
     shared_secret = x25519_derive(host_priv, ctrl_pub)
-    print(f"Shared secret: {shared_secret.hex()}")
+    print(f"Shared secret established (fingerprint: {hashlib.sha256(shared_secret).hexdigest()[:8]})")
     aes_key = shared_secret[:16]
 
     # Step 4: Encrypt pairing record with AES-128-CCM (20 bytes plain + 4 bytes MAC = 24 bytes)

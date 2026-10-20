@@ -397,7 +397,7 @@ pub fn dm_send_v2(opcode: u8, flags: u8, payload: &[u8]) -> bool {
         if !connected || e.dm.pending || payload.len() > 250 {
             return false;
         }
-        e.dm.seq = (e.dm.seq + 1) & 0x0F;
+        e.dm.seq = e.dm.seq.wrapping_add(1) & 0x0F;
         e.dm.v2 = true;
         e.dm.v2_flags = flags & 0xF0;
         e.dm.cmd[0] = opcode;
