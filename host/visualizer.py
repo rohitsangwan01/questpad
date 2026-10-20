@@ -55,7 +55,7 @@ class ControllerState:
         self.hand = Hand()
         self.ahrs = MadgwickAHRS(sample_period=1.0 / 500.0, beta=0.15)
         self.connected = False
-        self.battery = 100
+        self.battery = 0
         self.last_seen = 0.0
         self.last_imu_ts = 0
         self.recenter_hold_start = 0.0
@@ -218,7 +218,14 @@ class VisualizerServer:
                         self.send_error(HTTPStatus.NOT_FOUND)
                 elif path == "/events":
                     self._serve_sse()
-                elif path == "/recenter":
+                elif path == "/status":
+                    self._json_reply(server_instance.get_state())
+                else:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+
+            def do_POST(self):
+                path = self.path.split("?")[0]
+                if path == "/recenter":
                     side = None
                     if "?" in self.path:
                         for param in self.path.split("?")[1].split("&"):
@@ -229,8 +236,6 @@ class VisualizerServer:
                 elif path == "/toggle_demo":
                     server_instance.demo_mode = not server_instance.demo_mode
                     self._json_reply({"status": "ok", "demo": server_instance.demo_mode})
-                elif path == "/status":
-                    self._json_reply(server_instance.get_state())
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -244,7 +249,6 @@ class VisualizerServer:
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", content_type)
                     self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
                     self.wfile.write(data)
                 except Exception:
@@ -255,7 +259,6 @@ class VisualizerServer:
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -264,16 +267,17 @@ class VisualizerServer:
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "keep-alive")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
 
-                q = []
                 with server_instance.subscribers_lock:
                     server_instance.subscribers.append(self.wfile)
 
                 # Keep thread alive until client disconnects
                 try:
                     while server_instance.running:
+                        with server_instance.subscribers_lock:
+                            if self.wfile not in server_instance.subscribers:
+                                break
                         time.sleep(1.0)
                 except Exception:
                     pass

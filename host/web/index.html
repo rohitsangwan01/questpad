@@ -559,8 +559,10 @@
     function checkLoaded() {
       if (loadedLeft && loadedRight) {
         const overlay = document.getElementById('loading-overlay');
-        overlay.style.opacity = '0';
-        setTimeout(() => overlay.remove(), 500);
+        if (overlay) {
+          overlay.style.opacity = '0';
+          setTimeout(() => overlay.remove(), 500);
+        }
       }
     }
 
@@ -574,7 +576,10 @@
       checkLoaded();
     }, undefined, (err) => {
       console.error("Error loading left controller GLB:", err);
-      document.getElementById('loading-detail').innerText = "Failed loading left model: " + err;
+      const detail = document.getElementById('loading-detail');
+      if (detail) detail.innerText = "Failed loading left model: " + err;
+      loadedLeft = true;
+      setTimeout(checkLoaded, 2000);
     });
 
     loader.load('/assets/meta_quest_right_controller.glb', (gltf) => {
@@ -586,7 +591,10 @@
       checkLoaded();
     }, undefined, (err) => {
       console.error("Error loading right controller GLB:", err);
-      document.getElementById('loading-detail').innerText = "Failed loading right model: " + err;
+      const detail = document.getElementById('loading-detail');
+      if (detail) detail.innerText = "Failed loading right model: " + err;
+      loadedRight = true;
+      setTimeout(checkLoaded, 2000);
     });
 
     // ---- Input State & Live Updating ----
@@ -764,7 +772,7 @@
 
     // ---- Toolbar Actions ----
     function triggerRecenter() {
-      fetch('/recenter').catch(console.error);
+      fetch('/recenter', { method: 'POST' }).catch(console.error);
     }
 
     document.getElementById('btn-recenter').addEventListener('click', triggerRecenter);
@@ -775,7 +783,7 @@
     });
 
     document.getElementById('btn-demo').addEventListener('click', () => {
-      fetch('/toggle_demo').catch(console.error);
+      fetch('/toggle_demo', { method: 'POST' }).catch(console.error);
     });
 
     document.getElementById('btn-grid').addEventListener('click', () => {
