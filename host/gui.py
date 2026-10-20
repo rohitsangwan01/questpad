@@ -23,6 +23,7 @@ except ImportError:
     sys.path.insert(0, os.path.join(HERE, "vendor"))
 
 import dsu  # noqa: E402
+import visualizer  # noqa: E402
 from bridge import Bridge  # noqa: E402
 from mapping import LOG_ITEM_LEN, Hand  # noqa: E402
 
@@ -67,21 +68,42 @@ class Worker(threading.Thread):
         self.cmds = queue.Queue()
         self.bridge = None
         self.paused = False
-        self.tap = None  # sees every frame from the dongle, on this thread (the motion server's feed)
+        self.taps = set()
+        self.tap = self._dispatch_tap  # sees every frame from the dongle
 
     def call(self, fn, done=None, fail=None):
         """Run fn(bridge) on the worker; done(result) / fail(error) run on the GUI thread."""
         self.cmds.put((fn, done, fail))
 
-    def set_tap(self, fn):
-        self.tap = fn
+    def _dispatch_tap(self, frame):
+        for fn in list(self.taps):
+            try:
+                fn(frame)
+            except Exception:
+                pass
+
+    def add_tap(self, fn):
+        if fn:
+            self.taps.add(fn)
         if self.bridge:
-            self.bridge.tap = fn
+            self.bridge.tap = self._dispatch_tap
+
+    def remove_tap(self, fn):
+        self.taps.discard(fn)
+        if self.bridge:
+            self.bridge.tap = self._dispatch_tap if self.taps else None
+
+    def set_tap(self, fn):
+        self.taps.clear()
+        if fn:
+            self.taps.add(fn)
+        if self.bridge:
+            self.bridge.tap = self._dispatch_tap if self.taps else None
 
     def _connect(self):
         try:
             self.bridge = Bridge()
-            self.bridge.tap = self.tap
+            self.bridge.tap = self._dispatch_tap if self.taps else None
             self.events.put(("connected", self.bridge.ping()[1]))
         except (SystemExit, Exception):
             self.bridge = None
@@ -154,6 +176,7 @@ class App:
         self.connected = False
         self.version = ""
         self.motion = None  # dsu.Server while motion for emulators is on
+        self.visualizer = None  # visualizer.VisualizerServer for 3D controller visualization
         self._build()
         if demo:
             self._demo()
@@ -206,8 +229,10 @@ class App:
             ttk.Label(ctl, textvariable=inputs, font=("TkFixedFont", 10), width=34).grid(row=i, column=3, sticky="w")
             ttk.Button(ctl, text="Buzz", width=6, command=lambda s=side: self._buzz(s)).grid(row=i, column=4)
             self.ctl_rows[side] = (state, batt, inputs)
-        ttk.Button(ctl, text="Turn off controllers", command=self._power_off).grid(row=2, column=0, columnspan=3,
+        ttk.Button(ctl, text="Turn off controllers", command=self._power_off).grid(row=2, column=0, columnspan=2,
                                                                                   sticky="w", pady=(6, 0))
+        ttk.Button(ctl, text="Visualize 3D...", command=self._visualize_controllers).grid(row=2, column=2, columnspan=2,
+                                                                                          sticky="w", pady=(6, 0))
 
         # Pairing
         pr = ttk.LabelFrame(main, text="Pairing", padding=6)
@@ -362,6 +387,9 @@ class App:
                 inputs.set("")
         live = {slot for slot, _, _ in st["controllers"]}
         self.hands = {s: h for s, h in self.hands.items() if s in live}
+        if self.visualizer:
+            for slot, side, battery in st["controllers"]:
+                self.visualizer.set_controller_slot(slot, side, battery)
         if not getattr(self, "_pairing_active", False):
             ps = st["pair_state"]
             if ps in ("waiting", "writing"):
@@ -629,9 +657,9 @@ class App:
                 return
             if self.settings:
                 self.motion.settings = self.settings
-            self.worker.set_tap(self.motion.feed)
+            self.worker.add_tap(self.motion.feed)
         elif not self.motion_var.get() and self.motion:
-            self.worker.set_tap(None)
+            self.worker.remove_tap(self.motion.feed)
             self.motion.close()
             self.motion = None
         if remember:
@@ -647,9 +675,26 @@ class App:
         self.motion_status.set(where + (self.motion.describe() if self.connected else
                                         "waiting for the dongle (HID or DS4 mode)"))
 
+    def _visualize_controllers(self):
+        import webbrowser
+        if not self.visualizer:
+            try:
+                self.visualizer = visualizer.VisualizerServer()
+                self.worker.add_tap(self.visualizer.feed)
+            except Exception as e:
+                messagebox.showerror("QuestPad", f"Could not start 3D visualizer server:\n{e}")
+                return
+        for slot, item in self.hands.items():
+            side = item[0]
+            batt = self.ctl_rows[side][1]["value"] if side in self.ctl_rows else None
+            self.visualizer.set_controller_slot(slot, side, batt)
+        webbrowser.open(self.visualizer.url)
+
     def _quit(self):
         if self.motion:
             self.motion.close()  # emulators see the controllers leave, and ask again next time
+        if self.visualizer:
+            self.visualizer.close()
         self.root.destroy()
 
     def _show_settings(self, s):
