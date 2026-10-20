@@ -51,7 +51,7 @@ PAIR_TEXT = {
     "idle": "",
     "waiting": "Waiting: hold Oculus + Y (left) or Oculus + B (right) until the controller's LED blinks.",
     "writing": "Pairing...",
-    "done": "Paired! The controller is connecting.",
+    "done": "Paired successfully! Controller is connected and active.",
     "failed": "Pairing failed. Try again.",
     "timed out": "No controller found in pairing mode. Try again.",
     "cancelled": "Pairing cancelled.",
@@ -334,6 +334,9 @@ class App:
         fn, value = data
         fn(value)
 
+    def _on_pair_progress(self, ps):
+        self.pair_var.set(PAIR_TEXT.get(ps, ps))
+
     def _on_status(self, st):
         mode = st["mode"]
         paired = "paired" if st["paired"] else "not paired yet"
@@ -359,28 +362,48 @@ class App:
                 inputs.set("")
         live = {slot for slot, _, _ in st["controllers"]}
         self.hands = {s: h for s, h in self.hands.items() if s in live}
-        ps = st["pair_state"]
-        if ps in ("waiting", "writing"):
-            self.pair_var.set(PAIR_TEXT[ps])
-            self.pair_btn.config(text="Cancel pairing")
-        else:
-            self.pair_btn.config(text="Pair a controller")
+        if not getattr(self, "_pairing_active", False):
+            ps = st["pair_state"]
+            if ps in ("waiting", "writing"):
+                self.pair_var.set(PAIR_TEXT[ps])
+                self.pair_btn.config(text="Cancel pairing")
+            else:
+                self.pair_btn.config(text="Pair a controller")
         self._show_motion()
 
+    @staticmethod
+    def is_valid_ntf(buf):
+        if len(buf) < 2:
+            return False
+        nid = buf[0] & 0x1F
+        length = (buf[0] >> 5) | ((buf[1] & 0x0F) << 3)
+        return (nid <= 7 or nid == 22) and length > 0 and 2 + length <= len(buf)
+
+
     def _on_frame(self, f):
-        if f[0] == 0xA7:  # pairing progress
+        if f[0] == 0xA7 and not getattr(self, "_pairing_active", False):  # pairing progress
             ps = Bridge.PAIR_STATES[f[1]] if f[1] < len(Bridge.PAIR_STATES) else ""
             self.pair_var.set(PAIR_TEXT.get(ps, ps))
+        elif f[0] == 0xA0:
+            slot = f[1]
+            dev_type = struct.unpack_from("<I", f, 10)[0]
+            side = "right" if dev_type & 0x1_0000 != 0 else "left"
+            if slot not in self.hands or self.hands[slot][0] != side:
+                self.hands[slot] = (side, Hand())
         elif f[0] == 0xA1 and f[3] and f[1] in self.hands:
             p = f[4:]
-            if len(p) > 3 + LOG_ITEM_LEN and p[2] & 0x40:
+            if len(p) > 3 and p[2] & 0x40:
                 side, h = self.hands[f[1]]
-                h.update(p[3 + LOG_ITEM_LEN:])
+                off = 3 if self.is_valid_ntf(p[3:]) else 7
+                h.update(p[off:])
                 names = "ABS*" if side == "right" else "XYS*"
                 btn = "".join(n if h.buttons >> i & 1 else "." for i, n in enumerate(names))
                 self.ctl_rows[side][2].set(
                     f"{btn} stick {h.stick[0] // 330:+4d},{h.stick[1] // 330:+4d}  "
                     f"trig {h.trigger * 100 // 4095:3d}  grip {h.grip * 100 // 4095:3d}")
+                if h.battery and self.ctl_rows[side][1]["value"] != h.battery:
+                    self.ctl_rows[side][1]["value"] = h.battery
+                    self.ctl_rows[side][0].set(f"connected ({h.battery}%)")
 
     # ---- actions ----
 
@@ -405,9 +428,120 @@ class App:
             self.worker.call(lambda b: b.send(b"\x28"))
 
     def _pair(self):
-        if self._need():
-            self.pair_var.set(PAIR_TEXT["waiting"])
-            self.worker.call(lambda b: b.pair_start())
+        if not self._need():
+            return
+        if getattr(self, "_pairing_active", False):
+            self._cancel_pairing = True
+            self._pairing_active = False
+            self.pair_btn.config(text="Pair a controller")
+            self.pair_var.set(PAIR_TEXT["cancelled"])
+            self.worker.call(lambda b: b.link_resume())
+            return
+
+        self._pairing_active = True
+        self._cancel_pairing = False
+        self.pair_var.set(PAIR_TEXT["waiting"])
+        self.pair_btn.config(text="Cancel pairing")
+
+        def run_pair(b):
+            p = b.pair_export()
+            if p:
+                net_id, link_key = p[0], bytes.fromhex(p[1])
+            else:
+                pairing_file = os.path.join(HERE, "pairing.json")
+                if os.path.exists(pairing_file):
+                    try:
+                        pj = json.load(open(pairing_file))
+                        net_id = int(pj["network_id"])
+                        link_key = bytes.fromhex(pj["link_key"])
+                    except Exception:
+                        net_id = int.from_bytes(os.urandom(4), "little") & 0x7FFFFFFF
+                        link_key = os.urandom(16)
+                else:
+                    net_id = int.from_bytes(os.urandom(4), "little") & 0x7FFFFFFF
+                    link_key = os.urandom(16)
+
+            b.dm_start(any_device=True)
+            t_start = time.time()
+            connected = False
+            id0, id1 = 0, 0
+            while time.time() - t_start < 30.0:
+                if getattr(self, "_cancel_pairing", False):
+                    b.link_resume()
+                    return "cancelled"
+                for f in b.frames(0.1):
+                    if f[0] == 0x90:
+                        c, id0, id1 = struct.unpack_from("<BII", f, 1)
+                        if c:
+                            connected = True
+                            break
+                if connected:
+                    break
+
+            if not connected:
+                b.link_resume()
+                return "timed out"
+
+            if getattr(self, "_cancel_pairing", False):
+                b.link_resume()
+                return "cancelled"
+
+            self.events.put(("pair_progress", "writing"))
+            time.sleep(0.05)
+
+            rec = struct.pack("<I", net_id) + link_key
+            err = True
+            try:
+                err, _ = b.dm_cmd(0x14, rec, timeout=2.0)
+            except Exception:
+                err = True
+
+            if err:
+                try:
+                    from q3_pair import pair_q3
+                    pair_q3(b, net_id, link_key)
+                except Exception as e:
+                    print("Pairing error:", e)
+                    b.link_resume()
+                    return "failed"
+
+            pairing_file = os.path.join(HERE, "pairing.json")
+            try:
+                pj = json.load(open(pairing_file)) if os.path.exists(pairing_file) else {"controllers": {}}
+                pj["network_id"] = net_id
+                pj["link_key"] = link_key.hex()
+                pj.setdefault("controllers", {})[f"{id0:08x}{id1:08x}"] = {"paired_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+                json.dump(pj, open(pairing_file, "w"), indent=2)
+            except Exception:
+                pass
+
+            try:
+                # Command 0x15: reset controller out of pairing/DM mode into its main app
+                b.dm_cmd(0x15, b"", timeout=0.5)
+            except Exception:
+                pass
+            try:
+                b.dm_cmd_v2(0x15, b"", timeout=0.5)
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+            b.pair_store(net_id, link_key)
+            b.link_resume()
+            return "done"
+
+        def on_done(res):
+            self._pairing_active = False
+            self.pair_btn.config(text="Pair a controller")
+            self.pair_var.set(PAIR_TEXT.get(res, res))
+
+        def on_fail(err):
+            self._pairing_active = False
+            self.pair_btn.config(text="Pair a controller")
+            self.pair_var.set(PAIR_TEXT["failed"])
+            print("Pairing exception:", err)
+
+        self.worker.call(run_pair, on_done, on_fail)
 
     def _backup(self):
         if not self._need():

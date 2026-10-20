@@ -20,8 +20,20 @@ from bridge import Bridge
 from mapping import LOG_ITEM_LEN, Hand, combine, parse_notifications
 
 PAIRING_FILE = os.path.join(os.path.dirname(__file__), "pairing.json")
-TYPE_NAMES = {0x13001101: "left", 0x13011101: "right"}
+TYPE_NAMES = {
+    0x11001101: "left", 0x11011101: "right",
+    0x13001101: "left", 0x13011101: "right",
+    0x9a001701: "left", 0x9a011701: "right",
+}
 TL_NOTIFICATION = 0x40
+
+
+def is_valid_ntf(buf):
+    if len(buf) < 2:
+        return False
+    nid = buf[0] & 0x1F
+    length = (buf[0] >> 5) | ((buf[1] & 0x0F) << 3)
+    return (nid <= 7 or nid == 22) and length > 0 and 2 + length <= len(buf)
 
 
 class Host:
@@ -38,7 +50,7 @@ class Host:
         kind = f[0]
         if kind == 0xA0:
             slot, dev_id, dev_type = f[1], f[2:10], struct.unpack_from("<I", f, 10)[0]
-            name = TYPE_NAMES.get(dev_type, f"type {dev_type:#010x}")
+            name = TYPE_NAMES.get(dev_type, "right" if dev_type & 0x1_0000 else "left")
             self.hands[slot] = (name, Hand())
             print(f"JOIN slot {slot}: {name} id={dev_id.hex()}")
         elif kind == 0xA2:
@@ -55,10 +67,12 @@ class Host:
                 return
             # [slot][tl id][tl flags][log item 4][notification entries...]
             tl_id, tl_flags = payload[1], payload[2]
-            if tl_flags & TL_NOTIFICATION and len(payload) >= 3 + LOG_ITEM_LEN:
+            if tl_flags & TL_NOTIFICATION and len(payload) > 3:
                 name, hand = self.hands[slot]
-                self.log_item(slot, name, payload[3 : 3 + LOG_ITEM_LEN])
-                ntf = payload[3 + LOG_ITEM_LEN :]
+                off = 3 if is_valid_ntf(payload[3:]) else 7
+                if off == 7 and len(payload) >= 3 + LOG_ITEM_LEN:
+                    self.log_item(slot, name, payload[3 : 3 + LOG_ITEM_LEN])
+                ntf = payload[off:]
                 hand.update(ntf)
                 if self.changes:
                     snap = {k: v.hex() for k, v in sorted(hand.raw.items()) if k != 1}
